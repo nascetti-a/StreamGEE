@@ -1,88 +1,140 @@
 import streamlit as st
 import ee
-import json
+import geemap.foliumap as geemap
 import base64
-import folium
-from streamlit_folium import st_folium
-
-
-
+import json
 import tempfile
+import os
+import datetime  # Added for Streamlit date compatibility
 
-# --- 1. Load credentials ---
-SERVICE_ACCOUNT = st.secrets["gee"]["service_account"]
-PRIVATE_KEY_B64 = st.secrets["gee"]["private_key"]
+# --- Configuration ---
+st.set_page_config(layout="wide")
+st.title("🇪🇺 European Capitals Satellite Viewer")
 
-# Decode Base64 into JSON string
-decoded = base64.b64decode(PRIVATE_KEY_B64).decode("utf-8")
+# Define a list of major European capitals and their coordinates (Lon, Lat)
+EUROPEAN_CAPITALS = {
+    "Paris, France": (2.3522, 48.8566),
+    "Rome, Italy": (12.4964, 41.9028),
+    "Berlin, Germany": (13.4050, 52.5200),
+    "London, UK": (-0.1278, 51.5074),
+    "Madrid, Spain": (-3.7038, 40.4168),
+    "Vienna, Austria": (16.3738, 48.2082),
+    "Athens, Greece": (23.7275, 37.9838),
+    "Warsaw, Poland": (21.0118, 52.2297),
+    "Amsterdam, Netherlands": (4.8952, 52.3702),
+    "Oslo, Norway": (10.7522, 59.9139),
+    "Lisbon, Portugal": (-9.1393, 38.7223),
+}
 
-# --- 2. Write to temporary file ---
-with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as f:
-    f.write(decoded)
-    temp_path = f.name
-
-# --- 3. Initialize Earth Engine ---
+# --- Initialize EE (using the temporary file method) ---
 try:
+    # Ensure secrets are available
+    SERVICE_ACCOUNT = st.secrets["gee"]["service_account"]
+    PRIVATE_KEY_B64 = st.secrets["gee"]["private_key"]
+
+    # Decode the private key and write it to a temporary file for ee.Initialize
+    decoded = base64.b64decode(PRIVATE_KEY_B64).decode("utf-8")
+    with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as f:
+        f.write(decoded)
+        temp_path = f.name
+
     credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, temp_path)
     ee.Initialize(credentials)
-    st.success(f"✅ Earth Engine initialized for: {SERVICE_ACCOUNT}")
+    os.remove(temp_path)
+
+    st.success(f"✅ Earth Engine initialized successfully.")
 except Exception as e:
-    st.error(f"❌ Failed to initialize Earth Engine: {e}")
+    st.error(f"❌ Error initializing Earth Engine. Check your Streamlit secrets configuration. Error: {e}")
     st.stop()
 
+# --- User Inputs ---
+st.sidebar.header("Controls")
 
-st.set_page_config(page_title="Streamlit + Earth Engine", layout="wide")
+selected_city = st.sidebar.selectbox(
+    "1. Select a European Capital:",
+    options=list(EUROPEAN_CAPITALS.keys())
+)
 
-st.title("🌍 Earth Engine Streamlit App")
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    # Fixed: Use datetime.date for Streamlit compatibility
+    start_date = st.date_input("2. Start Date:", value=datetime.date(2023, 9, 1))
+with col2:
+    # Fixed: Use datetime.date for Streamlit compatibility
+    end_date = st.date_input("3. End Date:", value=datetime.date(2024, 3, 1))
 
+cloud_filter = st.sidebar.slider(
+    "4. Max Cloud Filter (%):",
+    min_value=1,
+    max_value=100,
+    value=15
+)
 
-# --- 3. Example: List available Sentinel-2 images ---
+# --- Processing Logic ---
+
+# Get selected city coordinates
+lon, lat = EUROPEAN_CAPITALS[selected_city]
+# Define a buffer around the city point (e.g., 25km radius)
+city_point = ee.Geometry.Point([lon, lat])
+aoi = city_point.buffer(25000)
+
+# Filter the Sentinel-2 ImageCollection
 try:
-    region = ee.Geometry.Point([12.4924, 41.8902])  # Rome
-    dataset = ee.ImageCollection("COPERNICUS/S2") \
-        .filterBounds(region) \
-        .filterDate("2024-01-01", "2024-02-01") \
-        .limit(5)
+    # Note: start_date.isoformat() works because start_date is now a datetime.date object
+    s2_collection = ee.ImageCollection("COPERNICUS/S2_HARMONIZED") \
+        .filterDate(start_date.isoformat(), end_date.isoformat()) \
+        .filterBounds(aoi) \
+        .filterMetadata('CLOUDY_PIXEL_PERCENTAGE', 'less_than', cloud_filter)
 
-    count = dataset.size().getInfo()
-    st.write(f"🛰️ Found {count} Sentinel-2 images near Rome (Jan 2024).")
+    # Calculate the size of the filtered collection (blocking call)
+    collection_size = s2_collection.size().getInfo()
 
-    # Display some image IDs
-    images = dataset.aggregate_array("system:id").getInfo()
-    st.write(images)
+    if collection_size == 0:
+        st.warning(
+            f"⚠️ No Sentinel-2 images found for **{selected_city}** with the current filters ({cloud_filter}% max cloudiness). Try expanding the date range or increasing the cloud filter.")
+        # Create a map centered on the city even if no image is found
+        Map = geemap.Map(center=[lat, lon], zoom=10)
+        Map.to_streamlit(width=800, height=500)
+        st.stop()
+    else:
+        # Calculate the median composite image
+        s2_composite = s2_collection.median()
+
+        # Calculate the average cloudiness of the source images
+        # This aggregates the 'CLOUDY_PIXEL_PERCENTAGE' property across the collection
+        mean_cloud_percentage = s2_collection.aggregate_mean('CLOUDY_PIXEL_PERCENTAGE').getInfo()
+
+        # Display analysis results
+        st.subheader(f"Data Analysis for {selected_city}")
+        st.info(f"📸 Images used for composite: **{collection_size}**")
+        st.info(f"☁️ Average Cloudiness of source images: **{mean_cloud_percentage:.2f}%** (before filtering)")
+
+        # Visualization parameters (Natural Color RGB)
+        vis_params = {
+            "bands": ["B4", "B3", "B2"],
+            "min": 0,
+            "max": 3000,
+            "gamma": 1.4
+        }
+
+        # Create a map centered on the selected city
+        Map = geemap.Map(center=[lat, lon], zoom=10)
+
+        # Add the composite layer to the map
+        Map.addLayer(s2_composite, vis_params, f"Sentinel-2 Composite: {selected_city}")
+
+        # Add a marker for the capital city center
+        Map.add_marker([lat, lon], tooltip=selected_city)
+        #Map.add_ee_layer(aoi.bounds(), {'color': 'red'}, 'Area of Interest')
+
+        # Display the map in Streamlit
+        st.subheader("Satellite Composite Visualization")
+        Map.to_streamlit(width=900, height=600)
 
 except Exception as e:
-    st.error(f"Error querying Earth Engine: {e}")
+    st.error(f"An Earth Engine error occurred during processing: {e}")
 
-# --- 4. Example: Display a simple map ---
-try:
-    # Pick one image to visualize
-    image = ee.Image("COPERNICUS/S2/20240101T101031_20240101T101029_T32TNR") \
-        .select(["B4", "B3", "B2"])  # RGB
-
-    vis_params = {"min": 0, "max": 3000, "gamma": 1.4}
-    map_center = [41.9, 12.5]
-
-    m = folium.Map(location=map_center, zoom_start=8)
-    m.add_ee_layer(image, vis_params, "Sentinel-2 RGB")
-
-    st_folium(m, width=800, height=500)
-
-except Exception as e:
-    st.error(f"Error displaying map: {e}")
-
-# --- 5. Helper to support Earth Engine layers in folium ---
-def add_ee_layer(self, ee_object, vis_params, name):
-    try:
-        map_id_dict = ee.Image(ee_object).getMapId(vis_params)
-        folium.raster_layers.TileLayer(
-            tiles=map_id_dict["tile_fetcher"].url_format,
-            attr="Map Data © Google Earth Engine",
-            name=name,
-            overlay=True,
-            control=True
-        ).add_to(self)
-    except Exception as e:
-        st.error(f"Error adding EE layer: {e}")
-
-folium.Map.add_ee_layer = add_ee_layer
+st.markdown("""
+---
+*Data Source: Copernicus Sentinel-2 Level 2A data via Google Earth Engine.*
+""")
