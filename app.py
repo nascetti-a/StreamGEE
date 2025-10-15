@@ -15,8 +15,9 @@ st.title("🇪🇺 European Capitals Satellite Viewer")
 
 # Define a list of major European capitals and their coordinates (Lon, Lat)
 EUROPEAN_CAPITALS = {
-    "Paris, France": (2.3522, 48.8566),
     "Rome, Italy": (12.4964, 41.9028),
+    "Stockholm, Sweden": (18.0656, 59.3327),
+    "Paris, France": (2.3522, 48.8566),
     "Berlin, Germany": (13.4050, 52.5200),
     "London, UK": (-0.1278, 51.5074),
     "Madrid, Spain": (-3.7038, 40.4168),
@@ -29,25 +30,38 @@ EUROPEAN_CAPITALS = {
 }
 
 # --- Initialize EE (using the temporary file method) ---
-try:
-    # Ensure secrets are available
-    SERVICE_ACCOUNT = st.secrets["gee"]["service_account"]
-    PRIVATE_KEY_B64 = st.secrets["gee"]["private_key"]
 
-    # Decode the private key and write it to a temporary file for ee.Initialize
-    decoded = base64.b64decode(PRIVATE_KEY_B64).decode("utf-8")
-    with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as f:
-        f.write(decoded)
-        temp_path = f.name
 
-    credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, temp_path)
-    ee.Initialize(credentials)
-    os.remove(temp_path)
+@st.cache_resource
+def initialize_ee_session():
+    """Initializes the Earth Engine session and caches the result."""
+    try:
+        # Ensure secrets are available
+        SERVICE_ACCOUNT = st.secrets["gee"]["service_account"]
+        PRIVATE_KEY_B64 = st.secrets["gee"]["private_key"]
 
-    st.success(f"✅ Earth Engine initialized successfully.")
-except Exception as e:
-    st.error(f"❌ Error initializing Earth Engine. Check your Streamlit secrets configuration. Error: {e}")
+        # Decode the private key and write it to a temporary file for ee.Initialize
+        decoded = base64.b64decode(PRIVATE_KEY_B64).decode("utf-8")
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as f:
+            f.write(decoded)
+            temp_path = f.name
+
+        credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, temp_path)
+        ee.Initialize(credentials)
+        os.remove(temp_path)
+
+        return True
+    except Exception as e:
+        st.error(f"❌ Error initializing Earth Engine. Check your Streamlit secrets configuration. Error: {e}")
+        return False
+
+
+# Run the initialization only once
+if initialize_ee_session():
+    st.success(f"✅ Earth Engine initialized successfully (Cached).")
+else:
     st.stop()
+
 
 # --- User Inputs ---
 st.sidebar.image("image/logo.png")
