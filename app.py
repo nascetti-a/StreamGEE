@@ -88,6 +88,7 @@ cloud_filter = st.sidebar.slider(
     value=15
 )
 
+
 # --- Processing Logic ---
 
 # Get selected city coordinates
