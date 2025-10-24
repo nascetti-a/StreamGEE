@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: gee-streamlit-app
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port=$PORT
+    plan: starter
